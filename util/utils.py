@@ -1,26 +1,32 @@
-# from ultralytics import YOLO
-import os
+from ultralytics import YOLO
+from transformers import AutoProcessor, AutoModelForCausalLM 
+
 import io
 import base64
 import time
-from PIL import Image, ImageDraw, ImageFont
-import json
-import requests
-# utility function
-import os
-from openai import AzureOpenAI
+from PIL import Image
 
-import json
-import sys
-import os
 import cv2
 import numpy as np
-# %matplotlib inline
+
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-reader = easyocr.Reader(['en'])
-paddle_ocr = PaddleOCR(
+
+import time
+import base64
+
+import torch
+from typing import Tuple, List, Union
+from torchvision.ops import box_convert
+
+from torchvision.transforms import ToPILImage
+import supervision as sv
+import torchvision.transforms as T
+from util.box_annotator import BoxAnnotator 
+
+easyocr_model = easyocr.Reader(['en'])
+paddle_ocr_model = PaddleOCR(
     lang='en',  # other lang also available
     use_angle_cls=False,
     use_gpu=False,  # using cuda will conflict with pytorch in the same process
@@ -29,51 +35,16 @@ paddle_ocr = PaddleOCR(
     use_dilation=True,  # improves accuracy
     det_db_score_mode='slow',  # improves accuracy
     rec_batch_num=1024)
-import time
-import base64
 
-import os
-import ast
-import torch
-from typing import Tuple, List, Union
-from torchvision.ops import box_convert
-import re
-from torchvision.transforms import ToPILImage
-import supervision as sv
-import torchvision.transforms as T
-from util.box_annotator import BoxAnnotator 
+def get_caption_model_processor(model_path, device='cuda'):
+    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, trust_remote_code=True)
 
-
-def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
-    if not device:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if model_name == "blip2":
-        from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        if device == 'cpu':
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float32
-        ) 
-        else:
-            model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float16
-        ).to(device)
-    elif model_name == "florence2":
-        from transformers import AutoProcessor, AutoModelForCausalLM 
-        processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
-        if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
-    return {'model': model.to(device), 'processor': processor}
-
+    return dict(model=model, processor=processor)
 
 def get_yolo_model(model_path):
-    from ultralytics import YOLO
-    # Load the model.
     model = YOLO(model_path)
     return model
-
 
 @torch.inference_mode()
 def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=128):
@@ -485,56 +456,29 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
 
     return pil_img, label_coordinates, filtered_boxes_elem
 
+def run_ocr(image_pil, ocr_model='paddleocr', threshold=0.5):
+    assert ocr_model in ['paddleocr', 'easyocr']
 
-def get_xywh(input):
-    x, y, w, h = input[0][0], input[0][1], input[2][0] - input[0][0], input[2][1] - input[0][1]
-    x, y, w, h = int(x), int(y), int(w), int(h)
-    return x, y, w, h
+    image_arr = np.asarray(image_pil)
 
-def get_xyxy(input):
-    x, y, xp, yp = input[0][0], input[0][1], input[2][0], input[2][1]
-    x, y, xp, yp = int(x), int(y), int(xp), int(yp)
-    return x, y, xp, yp
+    if ocr_model == 'paddleocr':
+        texts, bboxes = [], []
+        ocr_outs = paddle_ocr_model.ocr(image_arr, cls=False)[0]
+        for out in ocr_outs:
+            coord, (text, score) = out
+            if score < threshold: continue # filter with given threshold
 
-def get_xywh_yolo(input):
-    x, y, w, h = input[0], input[1], input[2] - input[0], input[3] - input[1]
-    x, y, w, h = int(x), int(y), int(w), int(h)
-    return x, y, w, h
+            # convert to xywh format
+            (x1, y1), (x2, y2) = coord[0], coord[2]
+            xywh = x1, y1, (x2-x1), (y2-y1)
+            xywh = tuple(map(int, xywh))
 
-def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, output_bb_format='xywh', goal_filtering=None, easyocr_args=None, use_paddleocr=False):
-    if isinstance(image_source, str):
-        image_source = Image.open(image_source)
-    if image_source.mode == 'RGBA':
-        # Convert RGBA to RGB to avoid alpha channel issues
-        image_source = image_source.convert('RGB')
-    image_np = np.array(image_source)
-    w, h = image_source.size
-    if use_paddleocr:
-        if easyocr_args is None:
-            text_threshold = 0.5
-        else:
-            text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
-    else:  # EasyOCR
-        if easyocr_args is None:
-            easyocr_args = {}
-        result = reader.readtext(image_np, **easyocr_args)
-        coord = [item[0] for item in result]
-        text = [item[1] for item in result]
-    if display_img:
-        opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        bb = []
-        for item in coord:
-            x, y, a, b = get_xywh(item)
-            bb.append((x, y, a, b))
-            cv2.rectangle(opencv_img, (x, y), (x+a, y+b), (0, 255, 0), 2)
-        #  matplotlib expects RGB
-        plt.imshow(cv2.cvtColor(opencv_img, cv2.COLOR_BGR2RGB))
-    else:
-        if output_bb_format == 'xywh':
-            bb = [get_xywh(item) for item in coord]
-        elif output_bb_format == 'xyxy':
-            bb = [get_xyxy(item) for item in coord]
-    return (text, bb), goal_filtering
+            texts.append(text)
+            bboxes.append(xywh)
+
+        return texts, bboxes
+    
+    elif ocr_model == 'easyocr':
+        raise NotImplementedError()
+        # result = easyocr_model.readtext(image_arr, text_threshold=threshold)
+        # coords, texts = zip(*result)
