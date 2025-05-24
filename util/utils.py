@@ -36,7 +36,7 @@ paddle_ocr_model = PaddleOCR(
     det_db_score_mode='slow',  # improves accuracy
     rec_batch_num=1024)
 
-def get_caption_model_processor(model_path, device='cuda'):
+def get_caption_model_and_processor(model_path, device='cuda'):
     processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16, trust_remote_code=True)
 
