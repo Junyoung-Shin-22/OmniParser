@@ -15,7 +15,8 @@ class BoxElement:
     bbox: np.array
     interactivity: bool
     content: str = None
-    source: str = None
+    source_bbox: str = None
+    source_content: str = None
 
     def __eq__(self, other):
         return np.all(self.bbox == other.bbox)
@@ -47,7 +48,7 @@ def run_ocr_model(ocr_model, image_arr, threshold=0.5):
             texts.append(text)
             bboxes.append(xywh)
 
-        box_elems = [BoxElement('text', bbox, False, text, 'box_ocr_content_ocr') 
+        box_elems = [BoxElement('text', bbox, False, text, 'ocr', 'ocr') 
                      for bbox, text in zip(bboxes, texts)]
         return box_elems
     
@@ -66,7 +67,7 @@ def run_yolo_model(yolo_model, image, yolo_model_conf):
     bboxes = result.boxes.xywh.cpu().numpy()
     bboxes[:, :2] -= bboxes[:, 2:] / 2 # yolo to coco format
     
-    box_elems = [BoxElement('icon', bbox, True) for bbox in bboxes]
+    box_elems = [BoxElement('icon', bbox, True, None, 'yolo', None) for bbox in bboxes]
     return box_elems
 
 def get_caption_model(model_path, device='cuda'):
@@ -171,11 +172,12 @@ def remove_overlap(ocr_elems, yolo_elems, iou_threshold=0.9):
                 break
         
         if flag:
-            new_elem = BoxElement('icon', yolo_bbox, True, None, 'box_yolo_content_yolo')
+            new_elem = BoxElement('icon', yolo_bbox, True, None, 'yolo', 'yolo')
             if ocr_contents:
                 content = ' '.join(ocr_contents)
                 new_elem.content = content
-                new_elem.source = 'box_yolo_content_ocr'
+                new_elem.source_bbox = 'yolo'
+                new_elem.source_content = 'ocr'
             
             filtered_elems.append(new_elem)
     
